@@ -9,7 +9,7 @@ from api.services.telephony.registry import (
     register,
 )
 
-from .config import ExotelConfigurationRequest, ExotelConfigurationResponse
+from .config import ExotelConfigurationRequest
 from .provider import ExotelProvider
 from .transport import create_transport
 
@@ -71,7 +71,6 @@ SPEC = ProviderSpec(
     transport_sample_rate=8000,
     config_request_cls=ExotelConfigurationRequest,
     ui_metadata=_UI_METADATA,
-    config_response_cls=ExotelConfigurationResponse,
     account_id_credential_field="account_sid",
 )
 
@@ -80,7 +79,6 @@ register(SPEC)
 __all__ = [
     "SPEC",
     "ExotelConfigurationRequest",
-    "ExotelConfigurationResponse",
     "ExotelProvider",
     "create_transport",
 ]

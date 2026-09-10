@@ -472,8 +472,15 @@ async def test_inbound_run_routes_exotel_without_account_id_by_called_number():
         call_id="call-1",
         raw_data={},
     )
-    config = SimpleNamespace(id=55, organization_id=11)
-    phone_row = SimpleNamespace(id=77, inbound_workflow_id=33)
+    config = SimpleNamespace(
+        id=55,
+        organization_id=11,
+        name="exotel-config",
+        credentials={"account_sid": "sid123"},
+    )
+    phone_row = SimpleNamespace(
+        id=77, inbound_workflow_id=33, address="07314852338"
+    )
     workflow = SimpleNamespace(id=33, user_id=99)
     provider_instance = SimpleNamespace(
         verify_inbound_signature=AsyncMock(return_value=True),

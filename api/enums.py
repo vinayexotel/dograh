@@ -86,6 +86,7 @@ WORKFLOW_RUN_MODES_BY_CHANNEL: dict[str, tuple[str, ...]] = {
         WorkflowRunMode.VONAGE.value,
         WorkflowRunMode.VOBIZ.value,
         WorkflowRunMode.CLOUDONIX.value,
+        WorkflowRunMode.EXOTEL.value,
         WorkflowRunMode.TELNYX.value,
         WorkflowRunMode.STASIS.value,
         WorkflowRunMode.VOICE.value,

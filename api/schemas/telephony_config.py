@@ -18,11 +18,9 @@ from api.services.telephony.providers.ari.config import (
 )
 from api.services.telephony.providers.cloudonix.config import (
     CloudonixConfigurationRequest,
-    CloudonixConfigurationResponse,
 )
 from api.services.telephony.providers.exotel.config import (
     ExotelConfigurationRequest,
-    ExotelConfigurationResponse,
 )
 from api.services.telephony.providers.plivo.config import (
     PlivoConfigurationRequest,
@@ -60,24 +58,6 @@ TelephonyConfigRequest = Annotated[
     ],
     Field(discriminator="provider"),
 ]
-
-
-class TelephonyConfigurationResponse(BaseModel):
-    """Top-level telephony configuration response.
-
-    Keeps the per-provider field shape that the UI client depends on. When
-    the UI moves to metadata-driven forms, this can be replaced with a
-    flat discriminated union.
-    """
-
-    twilio: Optional[TwilioConfigurationResponse] = None
-    plivo: Optional[PlivoConfigurationResponse] = None
-    vonage: Optional[VonageConfigurationResponse] = None
-    vobiz: Optional[VobizConfigurationResponse] = None
-    cloudonix: Optional[CloudonixConfigurationResponse] = None
-    exotel: Optional[ExotelConfigurationResponse] = None
-    ari: Optional[ARIConfigurationResponse] = None
-    telnyx: Optional[TelnyxConfigurationResponse] = None
 
 
 # ---------------------------------------------------------------------------
@@ -202,9 +182,7 @@ class TelephonyConfigurationListResponse(BaseModel):
 __all__ = [
     "ARIConfigurationRequest",
     "CloudonixConfigurationRequest",
-    "CloudonixConfigurationResponse",
     "ExotelConfigurationRequest",
-    "ExotelConfigurationResponse",
     "PlivoConfigurationRequest",
     "TelephonyConfigRequest",
     "TrunkCreateRequest",

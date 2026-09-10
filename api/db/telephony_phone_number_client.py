@@ -189,7 +189,37 @@ class TelephonyPhoneNumberClient(BaseDBClient):
                     f"org_scope={organization_id}"
                 )
                 return None
-            return row[0], row[1]
+
+            # The (provider, account_id, address_normalized) tuple is meant
+            # to be globally unique; the write paths that keep it so live in
+            # ``api.services.telephony.inbound_routing``. When it isn't, the
+            # call silently lands in whichever org Postgres returned first, so
+            # name every candidate rather than only the winner.
+            if len(rows) > 1:
+                candidates = ", ".join(
+                    f"config={cfg.id}/org={cfg.organization_id}/name={cfg.name!r}"
+                    f"/phone={phone.id}"
+                    for cfg, phone in rows
+                )
+                logger.error(
+                    f"Ambiguous inbound route — provider={provider} "
+                    f"{account_id_field}={account_id!r} "
+                    f"canonical={normalized.canonical!r} matched {len(rows)} "
+                    f"rows, using the first: {candidates}"
+                )
+
+            config, phone_number = rows[0][0], rows[0][1]
+            logger.info(
+                f"Inbound route resolved — provider={provider} "
+                f"{account_id_field}={account_id!r} "
+                f"canonical={normalized.canonical!r} -> config={config.id} "
+                f"org={config.organization_id} name={config.name!r} "
+                f"config_{account_id_field}="
+                f"{(config.credentials or {}).get(account_id_field)!r} "
+                f"phone={phone_number.id} address={phone_number.address!r} "
+                f"inbound_workflow_id={phone_number.inbound_workflow_id}"
+            )
+            return config, phone_number
 
     async def find_inbound_route_by_called_number(
         self,
@@ -234,7 +264,7 @@ class TelephonyPhoneNumberClient(BaseDBClient):
                 return rows[0][0], rows[0][1]
             return None
 
-    async def find_inbound_routing_conflict(
+    async def find_inbound_routing_conflicts(
         self,
         provider: str,
         account_id_field: str,

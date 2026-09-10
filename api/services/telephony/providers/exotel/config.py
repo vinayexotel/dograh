@@ -40,12 +40,3 @@ class ExotelConfigurationRequest(BaseModel):
                 "https://api.exotel.com"
             )
         return origin
-
-
-class ExotelConfigurationResponse(BaseModel):
-    provider: Literal["exotel"] = Field(default="exotel")
-    account_sid: str  # Masked
-    api_key: str  # Masked
-    api_token: str  # Masked
-    api_base_url: str
-    from_numbers: List[str]

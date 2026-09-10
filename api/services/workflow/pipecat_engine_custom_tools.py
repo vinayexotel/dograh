@@ -43,6 +43,12 @@ if TYPE_CHECKING:
     from api.services.workflow.pipecat_engine import PipecatEngine
 
 
+_TRANSFER_PLAYBACK_START_TIMEOUT_SECS = 5.0
+_TRANSFER_PLAYBACK_FINISH_TIMEOUT_SECS = 30.0
+_TRANSFER_EXTERNAL_PBX_API_TIMEOUT_SECS = 30.0
+_TRANSFER_POST_HANDOFF_DELAY_SECS = 4.0
+
+
 def _render_transfer_destination(
     destination_template: Any,
     call_context_vars: Optional[Dict[str, Any]],
@@ -357,7 +363,18 @@ class CustomToolManager:
                 resolver_timeout = 3.0
             resolver_timeout = min(max(resolver_timeout, 0.5), 5.0)
 
-        return float(transfer_timeout) + resolver_timeout + 15.0
+        # The function-call deadline wraps every sequential transfer phase.
+        # In particular, external-PBX handoff waits for caller-facing speech,
+        # then makes a provider request (VICIdial caps this at 30s), and finally
+        # allows the remote PBX to redirect the customer before local teardown.
+        return (
+            float(transfer_timeout)
+            + resolver_timeout
+            + _TRANSFER_PLAYBACK_START_TIMEOUT_SECS
+            + _TRANSFER_PLAYBACK_FINISH_TIMEOUT_SECS
+            + _TRANSFER_EXTERNAL_PBX_API_TIMEOUT_SECS
+            + _TRANSFER_POST_HANDOFF_DELAY_SECS
+        )
 
     def _register_calculator_handler(self) -> None:
         """Register the built-in calculator function with the LLM."""
@@ -498,12 +515,16 @@ class CustomToolManager:
                 # Handle end call reason if enabled
                 end_call_reason_enabled = config.get("endCallReason", False)
                 if end_call_reason_enabled:
-                    reason = (
-                        function_call_params.arguments.get("reason", "")
-                        or "end_call_tool"
-                    )
-                    logger.info(f"End call reason: {reason}")
-                    self._engine._gathered_context["call_disposition"] = reason
+                    raw_reason = function_call_params.arguments.get("reason")
+                    reason = raw_reason.strip() if isinstance(raw_reason, str) else ""
+                    if reason:
+                        logger.info(f"End call reason: {reason}")
+                        self._engine.set_call_disposition(reason)
+                    else:
+                        logger.info(
+                            "No end call reason provided; using call status as "
+                            "the disposition fallback"
+                        )
                     call_tags = self._engine._gathered_context.get("call_tags", [])
                     if "end_call_tool" not in call_tags:
                         call_tags.append("end_call_tool")
@@ -519,14 +540,14 @@ class CustomToolManager:
                 if played:
                     # End the call after the message (not immediately)
                     await self._engine.end_call_with_reason(
-                        EndTaskReason.END_CALL_TOOL_REASON.value,
+                        EndTaskReason.END_CALL.value,
                         abort_immediately=False,
                     )
                 else:
                     # No message - end call immediately
                     logger.info("Ending call immediately (no goodbye message)")
                     await self._engine.end_call_with_reason(
-                        EndTaskReason.END_CALL_TOOL_REASON.value, abort_immediately=True
+                        EndTaskReason.END_CALL.value, abort_immediately=True
                     )
 
             except Exception as e:
@@ -565,6 +586,12 @@ class CustomToolManager:
                 config = tool.definition.get("config", {})
                 destination = config.get("destination", "")
                 timeout_seconds = config.get("timeout", 30)
+                raw_call_disposition = config.get("call_disposition")
+                configured_call_disposition = (
+                    raw_call_disposition.strip()
+                    if isinstance(raw_call_disposition, str)
+                    else None
+                ) or None
 
                 # Check if this is a WebRTC call - transfers are not supported
                 workflow_run = await db_client.get_workflow_run_by_id(
@@ -617,10 +644,12 @@ class CustomToolManager:
                 external_pbx_call = external_pbx_call or (
                     getattr(workflow_run, "initial_context", None) or {}
                 ).get("upstream_pbx")
-                if external_pbx_call:
-                    # Context-to-in-group and lead-field mappings must see the
-                    # final conversation-derived values.
-                    await self._engine.perform_final_variable_extraction()
+                destination_source = config.get("destination_source", "static")
+                if external_pbx_call or destination_source == "context_mapping":
+                    # Context routing and external-PBX lead-field mappings must
+                    # see current conversation-derived values. This flush is
+                    # repeatable because a failed transfer resumes the agent.
+                    await self._engine.flush_variable_extraction()
 
                 resolver = config.get("resolver") if isinstance(config, dict) else None
                 is_dynamic_transfer = config.get(
@@ -660,25 +689,6 @@ class CustomToolManager:
                     )
                     return
 
-                if (
-                    resolved_transfer.source == "context_mapping"
-                    and not external_pbx_call
-                ):
-                    await self._handle_transfer_result(
-                        {
-                            "status": "failed",
-                            "message": (
-                                "This call did not arrive through the configured "
-                                "external PBX."
-                            ),
-                            "action": "transfer_failed",
-                            "reason": "external_pbx_call_required",
-                        },
-                        function_call_params,
-                        properties,
-                    )
-                    return
-
                 # Validate destination phone number
                 if not destination or not destination.strip():
                     validation_error_result = {
@@ -696,6 +706,7 @@ class CustomToolManager:
                     workflow_run, organization_id
                 )
 
+                self._engine.arm_speech_playback()
                 if resolved_transfer.message:
                     await self._engine.task.queue_frame(
                         TTSSpeakFrame(
@@ -704,10 +715,15 @@ class CustomToolManager:
                             persist_to_logs=True,
                         )
                     )
+                    message_queued = True
                 else:
-                    await self._play_config_message(config)
+                    message_queued = await self._play_config_message(config)
 
                 if external_pbx_call:
+                    transfer_disposition = (
+                        configured_call_disposition
+                        or EndTaskReason.CALL_TRANSFERRED.value
+                    )
                     workflow_configurations = (
                         await db_client.get_workflow_run_configurations(
                             self._engine._workflow_run_id, organization_id
@@ -717,28 +733,53 @@ class CustomToolManager:
                         self._engine._gathered_context,
                         workflow_configurations.get("external_pbx_field_mappings", []),
                     )
+                    # The external PBX pulls the customer off our leg as soon as
+                    # the transfer API returns, so the pre-transfer message has
+                    # to finish playing before we make that call.
+                    if message_queued:
+                        await self._engine.wait_for_speech_playback(
+                            start_timeout=_TRANSFER_PLAYBACK_START_TIMEOUT_SECS,
+                            playback_timeout=_TRANSFER_PLAYBACK_FINISH_TIMEOUT_SECS,
+                        )
                     external_result = await provider.transfer_external_pbx_call(
                         identity=external_pbx_call,
                         destination=destination,
                         field_updates=field_updates,
+                        # The PBX gets the organization's own code for a
+                        # transfer, resolved through the same mapping the
+                        # engine will stamp on the run a few lines below.
+                        disposition=self._engine.map_disposition(transfer_disposition),
                     )
                     if external_result is not None:
                         if external_result.get("status") == "success":
                             self._engine._gathered_context[
                                 "external_pbx_transferred"
                             ] = True
+                            # The PBX drops our media leg within ~100ms of the
+                            # transfer API returning, so on_client_disconnected
+                            # reaches end_call_with_reason long before the settle
+                            # delay below is over. Stamp the disposition now, or
+                            # that handler records this completed transfer as a
+                            # user hangup.
+                            self._engine.set_call_disposition(transfer_disposition)
                             await db_client.update_workflow_run(
                                 run_id=self._engine._workflow_run_id,
-                                gathered_context={"external_pbx_transferred": True},
+                                gathered_context={
+                                    "external_pbx_transferred": True,
+                                    "call_disposition": transfer_disposition,
+                                    "mapped_call_disposition": self._engine.map_disposition(
+                                        transfer_disposition
+                                    ),
+                                },
                             )
                             await function_call_params.result_callback(
                                 external_result, properties=properties
                             )
                             # Let VICIdial redirect the customer out of its
                             # conference before Dograh tears down the local leg.
-                            await asyncio.sleep(4)
+                            await asyncio.sleep(_TRANSFER_POST_HANDOFF_DELAY_SECS)
                             await self._engine.end_call_with_reason(
-                                EndTaskReason.END_CALL_TOOL_REASON.value,
+                                EndTaskReason.CALL_TRANSFERRED.value,
                                 abort_immediately=True,
                             )
                         else:
@@ -887,7 +928,10 @@ class CustomToolManager:
                 if transfer_event:
                     final_result = transfer_event.to_result_dict()
                     await self._handle_transfer_result(
-                        final_result, function_call_params, properties
+                        final_result,
+                        function_call_params,
+                        properties,
+                        success_disposition=configured_call_disposition,
                     )
                 else:
                     logger.error(
@@ -924,7 +968,11 @@ class CustomToolManager:
         return transfer_call_handler
 
     async def _handle_transfer_result(
-        self, result: dict, function_call_params, properties
+        self,
+        result: dict,
+        function_call_params,
+        properties,
+        success_disposition: str | None = None,
     ):
         """Handle transfer call outcomes from any telephony provider (Twilio, ARI, etc).
 
@@ -962,6 +1010,12 @@ class CustomToolManager:
                 },
                 properties=response_properties,
             )
+
+            # A tool-configured disposition replaces the normal transfer_call
+            # fallback only once the destination has actually answered. Stamping
+            # it before teardown also prevents final extraction from replacing it.
+            if success_disposition:
+                self._engine.set_call_disposition(success_disposition)
 
             # End pipeline - providers complete bridge swap/conference join as final transfer leg
             await self._engine.end_call_with_reason(

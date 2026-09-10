@@ -1,5 +1,6 @@
 import type {
     AmbientNoiseConfigurationDefaults,
+    CallDispositionOption as GeneratedCallDispositionOption,
     OrganizationAiModelConfigurationV2,
     WorkflowConfigurationDefaults as GeneratedWorkflowConfigurationDefaults,
 } from "@/client/types.gen";
@@ -69,6 +70,8 @@ export interface ExternalPBXFieldMapping {
     destination_field: string;
 }
 
+export type CallDispositionOption = GeneratedCallDispositionOption;
+
 export const DEFAULT_TRANSCRIPT_CONFIGURATION: TranscriptConfiguration = {
     include_end_timestamps: false,
 };
@@ -115,8 +118,10 @@ type WorkflowConfigurationBase = Omit<
     | "turn_stop_strategy"
     | "dictionary"
     | "context_compaction_enabled"
+    | "call_dispositions"
     | "text_chat_inactivity_timeout_seconds"
     | "external_pbx_field_mappings"
+    | "external_pbx_lead_headers"
 >;
 
 export type WorkflowConfigurations = WorkflowConfigurationBase & {
@@ -132,8 +137,10 @@ export type WorkflowConfigurations = WorkflowConfigurationBase & {
     voicemail_detection?: VoicemailDetectionConfiguration;
     transcript_configuration: TranscriptConfiguration;
     context_compaction_enabled: boolean;  // Summarize context on node transitions to remove stale tool calls
+    call_dispositions: CallDispositionOption[];  // Allowed terminal business outcomes
     text_chat_inactivity_timeout_seconds?: number;  // End inactive text chats after this many seconds
     external_pbx_field_mappings: ExternalPBXFieldMapping[];
+    external_pbx_lead_headers: string[];  // Extra lead fields to capture from the inbound INVITE
     model_overrides?: ModelOverrides;  // Per-workflow model configuration overrides
     model_configuration_v2_override?: OrganizationAiModelConfigurationV2;  // Full v2 model configuration override
     [key: string]: unknown;  // Allow additional properties for future configurations
@@ -154,7 +161,9 @@ const FALLBACK_WORKFLOW_CONFIGURATIONS: WorkflowConfigurations = {
     dictionary: '',
     transcript_configuration: DEFAULT_TRANSCRIPT_CONFIGURATION,
     context_compaction_enabled: false,
+    call_dispositions: [],
     external_pbx_field_mappings: [],
+    external_pbx_lead_headers: [],
 };
 
 export function resolveWorkflowConfigurations(
@@ -206,6 +215,10 @@ export function resolveWorkflowConfigurations(
             configurations?.context_compaction_enabled
             ?? defaults?.context_compaction_enabled
             ?? FALLBACK_WORKFLOW_CONFIGURATIONS.context_compaction_enabled,
+        call_dispositions:
+            configurations?.call_dispositions
+            ?? defaults?.call_dispositions
+            ?? FALLBACK_WORKFLOW_CONFIGURATIONS.call_dispositions,
         text_chat_inactivity_timeout_seconds:
             configurations?.text_chat_inactivity_timeout_seconds
             ?? defaults?.text_chat_inactivity_timeout_seconds,
@@ -213,6 +226,12 @@ export function resolveWorkflowConfigurations(
             configurations?.external_pbx_field_mappings
             ?? defaults?.external_pbx_field_mappings
             ?? FALLBACK_WORKFLOW_CONFIGURATIONS.external_pbx_field_mappings,
+        external_pbx_lead_headers:
+            configurations?.external_pbx_lead_headers
+            // Cast until `npm run generate-client` runs against a backend
+            // carrying this field; the generated defaults type predates it.
+            ?? (defaults?.external_pbx_lead_headers as string[] | undefined)
+            ?? FALLBACK_WORKFLOW_CONFIGURATIONS.external_pbx_lead_headers,
         transcript_configuration: {
             ...DEFAULT_TRANSCRIPT_CONFIGURATION,
             ...(defaults?.transcript_configuration as Partial<TranscriptConfiguration> | undefined),

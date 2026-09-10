@@ -104,12 +104,18 @@ class ARIConnection:
         app_password: str,
         ws_client_name: str = "",
         external_pbx_config: Optional[dict] = None,
+        stasis_app_name: str = "",
     ):
         self.organization_id = organization_id
         self.telephony_configuration_id = telephony_configuration_id
         self.ari_endpoint = ari_endpoint.rstrip("/")
         self.app_name = app_name
         self.app_password = app_password
+        # The ARI username and the Stasis application are separate namespaces in
+        # Asterisk; Dograh generates the latter so no two configurations can
+        # claim the same application. Rows written before the split carry only
+        # app_name and legitimately use it for both.
+        self.stasis_app_name = stasis_app_name or app_name
         self.ws_client_name = ws_client_name
         self.external_pbx_config = external_pbx_config
         self.external_pbx_adapter = create_adapter(external_pbx_config)
@@ -229,7 +235,7 @@ class ARIConnection:
         return (
             f"{ws_scheme}://{parsed.netloc}/ari/events"
             f"?api_key={self.app_name}:{self.app_password}"
-            f"&app={self.app_name}"
+            f"&app={self.stasis_app_name}"
             f"&subscribeAll=true"
         )
 
@@ -633,7 +639,10 @@ class ARIConnection:
         return (result or {}).get("value", "") or ""
 
     async def _capture_external_pbx_call(
-        self, channel_id: str, channel_name: str = ""
+        self,
+        channel_id: str,
+        channel_name: str = "",
+        lead_fields: Optional[list] = None,
     ) -> Optional[dict]:
         """Capture adapter-defined identity from inbound SIP headers."""
         if self.external_pbx_adapter is None:
@@ -649,14 +658,51 @@ class ARIConnection:
             )
             return None
 
-        async def read_header(name: str) -> str:
-            return await self._get_channel_var(channel_id, f"PJSIP_HEADER(read,{name})")
+        # Adapters batch header reads with asyncio.gather; each read is one
+        # ARI request, so bound the fan-out against the Asterisk HTTP server.
+        read_semaphore = asyncio.Semaphore(8)
 
-        identity = await self.external_pbx_adapter.capture_call_identity(read_header)
+        async def read_header(name: str) -> str:
+            async with read_semaphore:
+                return await self._get_channel_var(
+                    channel_id, f"PJSIP_HEADER(read,{name})"
+                )
+
+        # Discovery aid: PJSIP_HEADERS() returns header *names* in a single
+        # request, so listing what the PBX attaches costs one round trip no
+        # matter how many headers there are. Reading their values is what costs
+        # one request each, which is why this stays names-only.
+        if self.external_pbx_adapter.header_prefix:
+            prefix = self.external_pbx_adapter.header_prefix
+            raw = await self._get_channel_var(channel_id, f"PJSIP_HEADERS({prefix})")
+            available = sorted(
+                name.strip()[len(prefix) :]
+                for name in raw.split(",")
+                if name.strip()[len(prefix) :]
+            )
+            logger.info(
+                f"[ARI org={self.organization_id}] Available "
+                f"{self.external_pbx_adapter.type} lead fields on channel "
+                f"{channel_id}: {available or 'none'} — add the ones you need "
+                f"under the workflow's Lead Fields To Capture setting"
+            )
+
+        identity = await self.external_pbx_adapter.capture_call_identity(
+            read_header, lead_fields or ()
+        )
         if identity:
+            # Identity and lead payload values can carry customer/provider PII.
+            # Log only the names of non-empty fields that were captured.
+            identity_fields = sorted(
+                key
+                for key, value in identity.items()
+                if key != "lead" and value not in (None, "")
+            )
+            lead_fields = sorted((identity.get("lead") or {}).keys())
             logger.info(
                 f"[ARI org={self.organization_id}] Captured "
-                f"{self.external_pbx_adapter.type} call identity for channel {channel_id} identity: {identity}"
+                f"{self.external_pbx_adapter.type} call identity for channel {channel_id} "
+                f"identity_fields: {identity_fields} lead_fields: {lead_fields}"
             )
         return identity
 
@@ -695,7 +741,7 @@ class ARIConnection:
         transport_data = f"v({vparams})"
 
         params = {
-            "app": self.app_name,
+            "app": self.stasis_app_name,
             "external_host": self.ws_client_name,
             "format": "ulaw",
             "transport": "websocket",
@@ -820,8 +866,19 @@ class ARIConnection:
             call_id = channel_id
             run_inputs = await prepare_workflow_run_inputs(db_client, workflow)
             # Capture the configured external PBX identity from SIP headers.
+            # Lead fields come from the definition this run binds to, not from
+            # the workflow's draft-synced legacy column.
+            lead_fields = []
+            if self.external_pbx_adapter is not None:
+                workflow_configurations = await db_client.get_definition_configurations(
+                    run_inputs.definition_id,
+                    organization_id=self.organization_id,
+                )
+                lead_fields = (
+                    workflow_configurations.get("external_pbx_lead_headers") or []
+                )
             external_pbx_call = await self._capture_external_pbx_call(
-                channel_id, channel.get("name", "")
+                channel_id, channel.get("name", ""), lead_fields
             )
             workflow_run = await db_client.create_workflow_run(
                 name=f"ARI Inbound {caller_number}",
@@ -1392,6 +1449,7 @@ class ARIManager:
             ari_endpoint = config["ari_endpoint"]
             app_name = config["app_name"]
             app_password = config["app_password"]
+            stasis_app_name = config["stasis_app_name"]
             ws_client_name = config["ws_client_name"]
             external_pbx_config = config.get("external_pbx")
 
@@ -1403,6 +1461,7 @@ class ARIManager:
                 app_password,
                 ws_client_name,
                 external_pbx_config,
+                stasis_app_name,
             )
             key = conn.connection_key
 
@@ -1426,6 +1485,7 @@ class ARIManager:
                     existing.ari_endpoint != conn.ari_endpoint
                     or existing.app_name != app_name
                     or existing.app_password != app_password
+                    or existing.stasis_app_name != conn.stasis_app_name
                     or existing.ws_client_name != ws_client_name
                     or existing.external_pbx_config != external_pbx_config
                 ):
@@ -1515,6 +1575,9 @@ class ARIManager:
             ari_endpoint = credentials.get("ari_endpoint")
             app_name = credentials.get("app_name")
             app_password = credentials.get("app_password")
+            # Pre-split rows have no stasis_app_name and keep running on
+            # app_name, which is what their dialplan already routes into.
+            stasis_app_name = credentials.get("stasis_app_name") or app_name
             ws_client_name = credentials.get("ws_client_name", "")
             external_pbx = credentials.get("external_pbx")
             if external_pbx and not await external_pbx_integrations_enabled(
@@ -1568,6 +1631,7 @@ class ARIManager:
                     "ari_endpoint": ari_endpoint,
                     "app_name": app_name,
                     "app_password": app_password,
+                    "stasis_app_name": stasis_app_name,
                     "ws_client_name": ws_client_name,
                     "external_pbx": external_pbx,
                 }

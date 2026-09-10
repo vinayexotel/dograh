@@ -95,6 +95,7 @@ class ServiceProviders(str, Enum):
     GOOGLE_REALTIME = "google_realtime"
     GOOGLE_VERTEX_REALTIME = "google_vertex_realtime"
     AZURE_REALTIME = "azure_realtime"
+    AWS_NOVA_SONIC = "aws_nova_sonic"
     SMALLEST = "smallest"
     XAI = "xai"
     LMNT = "lmnt"
@@ -127,6 +128,7 @@ class BaseServiceConfiguration(BaseModel):
         ServiceProviders.GOOGLE_REALTIME,
         ServiceProviders.GOOGLE_VERTEX_REALTIME,
         ServiceProviders.AZURE_REALTIME,
+        ServiceProviders.AWS_NOVA_SONIC,
         ServiceProviders.SARVAM,
         ServiceProviders.SMALLEST,
         ServiceProviders.XAI,
@@ -352,6 +354,17 @@ AZURE_REALTIME_PROVIDER_MODEL_CONFIG = provider_model_config(
     "Azure OpenAI Realtime",
     description="Azure OpenAI Realtime API — low-latency speech-to-speech conversations.",
     provider_docs_url="https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/realtime-audio-quickstart",
+)
+AWS_NOVA_SONIC_PROVIDER_MODEL_CONFIG = provider_model_config(
+    "AWS Nova 2 Sonic",
+    description=(
+        "Amazon Bedrock's realtime speech-to-speech model. Uses AWS IAM "
+        "credentials rather than a Bedrock API key."
+    ),
+    provider_docs_url=(
+        "https://docs.aws.amazon.com/nova/latest/nova2-userguide/"
+        "sonic-getting-started.html"
+    ),
 )
 
 OPENAI_MODELS = [
@@ -679,6 +692,32 @@ OPENAI_REALTIME_VOICES = [
     "shimmer",
     "verse",
 ]
+AWS_NOVA_SONIC_MODELS = ["amazon.nova-2-sonic-v1:0"]
+AWS_NOVA_SONIC_VOICES = [
+    "tiffany",
+    "matthew",
+    "amy",
+    "olivia",
+    "kiara",
+    "arjun",
+    "ambre",
+    "florian",
+    "beatrice",
+    "lorenzo",
+    "tina",
+    "lennart",
+    "lupe",
+    "carlos",
+    "carolina",
+    "leo",
+]
+AWS_NOVA_SONIC_REGIONS = [
+    "us-east-1",
+    "us-west-2",
+    "eu-north-1",
+    "ap-northeast-1",
+]
+AWS_NOVA_SONIC_ENDPOINTING_SENSITIVITIES = ["HIGH", "MEDIUM", "LOW"]
 
 
 @register_service(ServiceType.REALTIME)
@@ -713,6 +752,91 @@ class OpenAIRealtimeLLMConfiguration(BaseLLMConfiguration):
             "examples": OPENAI_REALTIME_LANGUAGES,
             "allow_custom_input": True,
         },
+    )
+
+
+@register_service(ServiceType.REALTIME)
+class AWSNovaSonicRealtimeLLMConfiguration(BaseLLMConfiguration):
+    model_config = AWS_NOVA_SONIC_PROVIDER_MODEL_CONFIG
+    provider: Literal[ServiceProviders.AWS_NOVA_SONIC] = ServiceProviders.AWS_NOVA_SONIC
+    model: str = Field(
+        default="amazon.nova-2-sonic-v1:0",
+        description="Amazon Nova 2 Sonic model ID.",
+        json_schema_extra={
+            "examples": AWS_NOVA_SONIC_MODELS,
+            "allow_custom_input": True,
+        },
+    )
+    voice: str = Field(
+        default="matthew",
+        description=(
+            "Voice the model speaks in. Tiffany and Matthew are polyglot voices."
+        ),
+        json_schema_extra={
+            "examples": AWS_NOVA_SONIC_VOICES,
+            "allow_custom_input": True,
+            "docs_url": (
+                "https://docs.aws.amazon.com/nova/latest/nova2-userguide/"
+                "sonic-language-support.html"
+            ),
+        },
+    )
+    aws_access_key: str = Field(
+        default="",
+        description=(
+            "AWS access key ID with permission to invoke Nova 2 Sonic in Bedrock."
+        ),
+    )
+    aws_secret_key: str = Field(
+        default="",
+        description="AWS secret access key paired with the access key ID.",
+    )
+    aws_session_token: str | None = Field(
+        default=None,
+        description="Optional AWS session token for temporary IAM credentials.",
+    )
+    aws_region: str = Field(
+        default="us-east-1",
+        description="AWS region where Nova 2 Sonic is enabled for the account.",
+        json_schema_extra={
+            "examples": AWS_NOVA_SONIC_REGIONS,
+            "allow_custom_input": True,
+        },
+    )
+    endpointing_sensitivity: Literal["HIGH", "MEDIUM", "LOW"] | None = Field(
+        default=None,
+        description=(
+            "How quickly Nova decides the user has stopped speaking. Leave blank "
+            "to use the model default."
+        ),
+        json_schema_extra={
+            "examples": AWS_NOVA_SONIC_ENDPOINTING_SENSITIVITIES,
+        },
+    )
+    temperature: float = Field(
+        default=0.7,
+        gt=0.0,
+        le=1.0,
+        description="Sampling temperature for Nova 2 Sonic (greater than 0, up to 1).",
+    )
+    max_tokens: int = Field(
+        default=1024,
+        ge=1,
+        le=5000,
+        description="Maximum response tokens.",
+    )
+    top_p: float = Field(
+        default=0.9,
+        ge=0.0,
+        le=1.0,
+        description="Nucleus-sampling threshold.",
+    )
+    api_key: str | list[str] | None = Field(
+        default=None,
+        description=(
+            "Not used for Nova 2 Sonic — authentication is via the AWS "
+            "credentials above. Leave blank."
+        ),
     )
 
 
@@ -793,6 +917,12 @@ class GoogleRealtimeLLMConfiguration(BaseLLMConfiguration):
             "allow_custom_input": True,
         },
     )
+    temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for Gemini Live (0.0 to 2.0).",
+    )
 
 
 @register_service(ServiceType.REALTIME)
@@ -824,6 +954,12 @@ class GoogleVertexRealtimeLLMConfiguration(BaseLLMConfiguration):
             "examples": GOOGLE_VERTEX_REALTIME_LANGUAGES,
             "allow_custom_input": True,
         },
+    )
+    temperature: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature for Gemini Live (0.0 to 2.0).",
     )
     project_id: str = Field(description="Google Cloud project ID for Vertex AI.")
     location: str = Field(
@@ -889,6 +1025,7 @@ REALTIME_PROVIDERS = {
     ServiceProviders.GOOGLE_REALTIME.value,
     ServiceProviders.GOOGLE_VERTEX_REALTIME.value,
     ServiceProviders.AZURE_REALTIME.value,
+    ServiceProviders.AWS_NOVA_SONIC.value,
 }
 
 
@@ -919,6 +1056,7 @@ RealtimeConfig = Annotated[
         GoogleRealtimeLLMConfiguration,
         GoogleVertexRealtimeLLMConfiguration,
         AzureRealtimeLLMConfiguration,
+        AWSNovaSonicRealtimeLLMConfiguration,
     ],
     Field(discriminator="provider"),
 ]
@@ -1079,7 +1217,7 @@ class DograhTTSService(BaseTTSConfiguration):
     speed: float = Field(default=1.0, ge=0.5, le=2.0, description="Speed of the voice.")
 
 
-CARTESIA_TTS_MODELS = ["sonic-3.5", "sonic-3"]
+CARTESIA_TTS_MODELS = ["sonic-3.6", "sonic-3.5", "sonic-3"]
 INWORLD_TTS_MODELS = ["inworld-tts-2"]
 INWORLD_TTS_VOICES = ["Ashley"]
 INWORLD_TTS_LANGUAGES = ["en-US"]

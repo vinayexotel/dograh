@@ -41,6 +41,33 @@ class ProviderSyncResult:
     message: Optional[str] = None  # human-readable detail when ok=False
 
 
+@dataclass(frozen=True)
+class SIPTransportDetails:
+    """Connection details for one supported inbound SIP transport."""
+
+    transport: str
+    hostname: str
+    port: int
+    uri: str
+
+
+@dataclass(frozen=True)
+class SIPRegionDetails:
+    """Inbound and outbound SIP details for one provider region."""
+
+    region: str
+    inbound_transports: list[SIPTransportDetails]
+    outbound_origin_ip: str
+
+
+@dataclass(frozen=True)
+class SIPConnectivityDetails:
+    """Provider-supplied SIP connection details displayed to customers."""
+
+    provider_display_name: str
+    regions: list[SIPRegionDetails]
+
+
 class ProviderPhoneNumberLookupError(Exception):
     """The provider could not determine whether it owns a phone number.
 
@@ -49,7 +76,18 @@ class ProviderPhoneNumberLookupError(Exception):
     this exception means credentials, transport, or the upstream API failed,
     so callers should surface a provider error instead of treating the number
     as unowned.
+
+    ``status_code`` carries the provider's HTTP status when the lookup reached
+    the API. Failure classification reads it structurally — an auth rejection
+    has to be attributable as the account holder's configuration rather than a
+    Dograh fault, and that must not depend on parsing the provider's wording.
+    It is ``None`` when the call failed before a response (transport, DNS, or
+    credentials missing locally).
     """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass
@@ -68,15 +106,6 @@ class NormalizedInboundData:
     raw_data: Dict[str, Any] = field(default_factory=dict)  # Original webhook data
 
 
-@dataclass
-class AnsweringMachineDetectionResult:
-    """Standardized answering-machine detection result across providers."""
-
-    call_id: str
-    answered_by: str
-    raw_data: Dict[str, Any] = field(default_factory=dict)
-
-
 class TelephonyProvider(ABC):
     """
     Abstract base class for telephony providers.
@@ -89,6 +118,34 @@ class TelephonyProvider(ABC):
     # Populated by provider constructors from the factory-normalized config.
     from_numbers: List[str] = []
     default_from_number: Optional[str] = None
+    # Carrier paths on this configuration, and the trunk each active number is
+    # authorized on. Empty unless the provider's integration models trunks.
+    trunks: List[Dict[str, Any]] = []
+    trunk_id_by_number: Dict[str, Optional[int]] = {}
+
+    def select_trunk(self, from_number: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The carrier path a call presenting ``from_number`` must take.
+
+        The number's own trunk wins, because a carrier rejects — or declines to
+        attest — a caller ID it does not own. A number with no trunk falls back
+        to the sole enabled one, which is unambiguous; with several there is no
+        honest answer, so the call goes out unpinned rather than down a carrier
+        picked at random. The setup checklist asks the operator to assign the
+        number rather than leaving that to chance.
+
+        Returns None when the resolved trunk is disabled: the operator switched
+        it off, so routing the call over a different one would present exactly
+        the mismatched caller ID this method exists to avoid.
+        """
+        enabled = [trunk for trunk in self.trunks if trunk.get("enabled")]
+
+        trunk_id = self.trunk_id_by_number.get(from_number) if from_number else None
+        if trunk_id is not None:
+            return next(
+                (trunk for trunk in enabled if trunk.get("id") == trunk_id), None
+            )
+
+        return enabled[0] if len(enabled) == 1 else None
 
     def select_from_number(self, from_number: Optional[str] = None) -> Optional[str]:
         """Resolve the caller ID for a one-off outbound call.
@@ -238,21 +295,13 @@ class TelephonyProvider(ABC):
         """
         pass
 
-    def supports_answering_machine_detection(self) -> bool:
-        """Return whether this provider can request answering-machine detection."""
-        return False
+    def get_sip_connectivity_details(self) -> SIPConnectivityDetails | None:
+        """Return inbound SIP trunk details when this provider supports them.
 
-    def apply_answering_machine_detection_call_params(
-        self,
-        data: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Add provider-specific AMD parameters to an outbound call request."""
-        return data
-
-    def parse_answering_machine_detection_result(
-        self, data: Dict[str, Any]
-    ) -> Optional[AnsweringMachineDetectionResult]:
-        """Parse provider-specific callback data into a normalized AMD result."""
+        Providers opt in by overriding this method. Keeping the default empty
+        lets the configuration UI render the SIP panel generically without a
+        hard-coded list of capable providers.
+        """
         return None
 
     @abstractmethod
@@ -425,6 +474,15 @@ class TelephonyProvider(ABC):
         """
         return ProviderSyncResult(ok=True)
 
+    async def provision_phone_number(self, address: str) -> ProviderSyncResult | None:
+        """Provision ``address`` at the provider before storing it locally.
+
+        The default ``None`` means the provider does not support provisioning,
+        so the shared route falls back to the read-only ownership validation
+        below. Providers that opt in must make this operation idempotent.
+        """
+        return None
+
     @abstractmethod
     async def validate_phone_number(self, address: str) -> ProviderSyncResult:
         """Check that ``address`` belongs to this provider configuration.
@@ -500,8 +558,14 @@ class TelephonyProvider(ABC):
         identity: Dict[str, Any],
         destination: str,
         field_updates: Optional[Dict[str, str]] = None,
+        disposition: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Handle an external-PBX-owned customer leg when one is present.
+
+        ``disposition`` is the outcome to record on the PBX's own copy of the
+        call, already translated through the organization's disposition
+        mapping. The caller resolves it because the transfer completes before
+        the disposition is stamped on the run.
 
         Providers without an external PBX return ``None`` so the ordinary
         telephony transfer path continues unchanged.

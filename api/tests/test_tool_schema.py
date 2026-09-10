@@ -1,6 +1,10 @@
 import pytest
 
-from api.schemas.tool import TransferCallConfig
+from api.schemas.tool import (
+    MAX_TRANSFER_CALL_DISPOSITION_LENGTH,
+    ContextDestinationMappingConfig,
+    TransferCallConfig,
+)
 
 
 def test_transfer_call_destination_accepts_initial_context_template():
@@ -22,6 +26,21 @@ def test_transfer_call_static_allows_empty_draft_destination():
 
     assert config.destination_source == "static"
     assert config.destination == ""
+
+
+def test_transfer_call_normalizes_blank_call_disposition():
+    config = TransferCallConfig(call_disposition="  transferred_to_sales  ")
+    blank = TransferCallConfig(call_disposition="  ")
+
+    assert config.call_disposition == "transferred_to_sales"
+    assert blank.call_disposition is None
+
+
+def test_transfer_call_disposition_has_a_bounded_size():
+    with pytest.raises(ValueError, match="at most 64 characters"):
+        TransferCallConfig(
+            call_disposition="x" * (MAX_TRANSFER_CALL_DISPOSITION_LENGTH + 1)
+        )
 
 
 def test_transfer_call_dynamic_requires_resolver():
@@ -63,7 +82,87 @@ def test_transfer_call_context_mapping_accepts_unique_routes():
     )
 
     assert config.context_mapping is not None
-    assert config.context_mapping.routes[0].destination == "sales"
+    assert len(config.context_mapping.rules) == 1
+    assert config.context_mapping.rules[0].context_path == "qualified"
+    assert config.context_mapping.rules[0].routes[0].destination == "sales"
+
+
+def test_context_mapping_openapi_advertises_legacy_single_rule_shape():
+    schema = ContextDestinationMappingConfig.model_json_schema()
+
+    assert "rules" not in schema.get("required", [])
+    assert "Deprecated" in schema["properties"]["context_path"]["description"]
+    assert "Deprecated" in schema["properties"]["routes"]["description"]
+
+
+def test_transfer_call_context_mapping_keeps_rule_order():
+    config = TransferCallConfig(
+        destination_source="context_mapping",
+        context_mapping={
+            "rules": [
+                {
+                    "context_path": "qualified",
+                    "routes": [{"context_value": "yes", "destination": "sales"}],
+                },
+                {
+                    "context_path": "state",
+                    "routes": [{"context_value": "tx", "destination": "texas"}],
+                },
+            ],
+            "fallback_destination": "source",
+        },
+    )
+
+    assert config.context_mapping is not None
+    assert [rule.context_path for rule in config.context_mapping.rules] == [
+        "qualified",
+        "state",
+    ]
+
+
+def test_transfer_call_context_mapping_requires_at_least_one_rule():
+    with pytest.raises(ValueError, match="rules"):
+        TransferCallConfig(
+            destination_source="context_mapping",
+            context_mapping={"rules": []},
+        )
+
+
+def test_transfer_call_context_mapping_rejects_more_than_twenty_rules():
+    with pytest.raises(ValueError, match="more than 20"):
+        TransferCallConfig(
+            destination_source="context_mapping",
+            context_mapping={
+                "rules": [
+                    {
+                        "context_path": f"path_{index}",
+                        "routes": [{"context_value": "yes", "destination": "sales"}],
+                    }
+                    for index in range(21)
+                ]
+            },
+        )
+
+
+def test_transfer_call_context_mapping_allows_duplicate_values_across_rules():
+    config = TransferCallConfig(
+        destination_source="context_mapping",
+        context_mapping={
+            "rules": [
+                {
+                    "context_path": "qualified",
+                    "routes": [{"context_value": "yes", "destination": "sales"}],
+                },
+                {
+                    "context_path": "callback_requested",
+                    "routes": [{"context_value": "yes", "destination": "callbacks"}],
+                },
+            ],
+        },
+    )
+
+    assert config.context_mapping is not None
+    assert len(config.context_mapping.rules) == 2
 
 
 def test_transfer_call_context_mapping_rejects_blank_context_path():

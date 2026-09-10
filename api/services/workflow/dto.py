@@ -43,6 +43,13 @@ class VariableType(str, Enum):
     boolean = "boolean"
 
 
+class PreCallFetchMode(str, Enum):
+    disabled = "disabled"
+    always = "always"
+    inbound = "inbound"
+    outbound = "outbound"
+
+
 class ExtractionVariableDTO(BaseModel):
     name: str = spec_field(
         ...,
@@ -146,7 +153,8 @@ class _ExtractionNodeDataMixin(BaseModel):
         display_name="Variables to Extract",
         description=(
             "Each entry declares one variable to capture, with its name, data "
-            "type, and extraction hint."
+            "type, and extraction hint. Call outcomes are configured separately "
+            "in workflow settings."
         ),
         display_options=DisplayOptions(show={"extraction_enabled": [True]}),
     )
@@ -217,7 +225,7 @@ class _ToolDocumentRefsMixin(BaseModel):
         "extraction_variables",
         "tool_uuids",
         "document_uuids",
-        "pre_call_fetch_enabled",
+        "pre_call_fetch_mode",
         "pre_call_fetch_url",
         "pre_call_fetch_credential_uuid",
     ),
@@ -289,13 +297,19 @@ class _ToolDocumentRefsMixin(BaseModel):
             "max_value": 10.0,
             "display_options": DisplayOptions(show={"delayed_start": [True]}),
         },
-        "pre_call_fetch_enabled": {
+        "pre_call_fetch_mode": {
             "display_name": "Pre-Call Data Fetch",
             "description": (
-                "When true, makes a POST request to an external API before the "
-                "call starts and merges the JSON response into the call context "
-                "as template variables."
+                "Controls when a POST request is made to enrich the call context "
+                "before the Start node opens."
             ),
+            "options": [
+                PropertyOption(value="disabled", label="Disabled"),
+                PropertyOption(value="always", label="Always"),
+                PropertyOption(value="inbound", label="Inbound calls only"),
+                PropertyOption(value="outbound", label="Outbound calls only"),
+            ],
+            "spec_default": "disabled",
         },
         "pre_call_fetch_url": {
             "display_name": "Endpoint URL",
@@ -304,7 +318,9 @@ class _ToolDocumentRefsMixin(BaseModel):
                 "includes caller and called numbers."
             ),
             "ui_type": PropertyType.url,
-            "display_options": DisplayOptions(show={"pre_call_fetch_enabled": [True]}),
+            "display_options": DisplayOptions(
+                show={"pre_call_fetch_mode": ["always", "inbound", "outbound"]}
+            ),
             "placeholder": "https://api.example.com/customer-lookup",
         },
         "pre_call_fetch_credential_uuid": {
@@ -312,7 +328,9 @@ class _ToolDocumentRefsMixin(BaseModel):
             "description": "Optional credential attached to the pre-call request.",
             "ui_type": PropertyType.credential_ref,
             "llm_hint": "Credential UUID from `list_credentials`.",
-            "display_options": DisplayOptions(show={"pre_call_fetch_enabled": [True]}),
+            "display_options": DisplayOptions(
+                show={"pre_call_fetch_mode": ["always", "inbound", "outbound"]}
+            ),
         },
     },
 )
@@ -334,8 +352,8 @@ class StartCallNodeData(
     delayed_start_duration: Optional[float] = spec_field(
         default=None, ui_type=PropertyType.number
     )
-    pre_call_fetch_enabled: bool = spec_field(
-        default=False, ui_type=PropertyType.boolean
+    pre_call_fetch_mode: PreCallFetchMode = spec_field(
+        default=PreCallFetchMode.disabled, ui_type=PropertyType.options
     )
     pre_call_fetch_url: Optional[str] = spec_field(
         default=None, ui_type=PropertyType.url
@@ -343,6 +361,33 @@ class StartCallNodeData(
     pre_call_fetch_credential_uuid: Optional[str] = spec_field(
         default=None, ui_type=PropertyType.credential_ref
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_legacy_pre_call_fetch_toggle(cls, data):
+        """Deprecated input shim for the pre-#638 ``pre_call_fetch_enabled``.
+
+        Stored definitions were migrated by alembic ``f3a1c47b9e02``, so this
+        only catches writes from clients still on the old field — old SDK pins
+        and hand-rolled API callers. Without it the key would be dropped
+        silently (node data models ignore extras) and the node would fall back
+        to ``disabled``, turning off a fetch the caller asked for.
+
+        Remove once those clients are gone; the field is no longer emitted by
+        the UI, the SDKs, or the node spec.
+        """
+        if not isinstance(data, dict) or "pre_call_fetch_enabled" not in data:
+            return data
+
+        data = dict(data)
+        legacy_enabled = data.pop("pre_call_fetch_enabled")
+        # An explicit mode always wins — a caller sending both means the new
+        # field, with the legacy key left over from whatever it round-tripped.
+        if data.get("pre_call_fetch_mode") is None:
+            data["pre_call_fetch_mode"] = (
+                PreCallFetchMode.always if legacy_enabled else PreCallFetchMode.disabled
+            )
+        return data
 
 
 @node_spec(
@@ -593,9 +638,16 @@ class GlobalNodeData(BaseNodeData, _PromptedNodeDataMixin):
         "Request body fields:\n"
         "  • `phone_number` (string, required) — destination to dial.\n"
         "  • `initial_context` (object, optional) — merged into the run's initial context.\n"
+        "    To override the Start-node greeting for one call, provide "
+        "`greeting_override`: either "
+        '`{"type": "text", "text": "Hi {{name}}"}` or '
+        '`{"type": "audio", "recording_id": "welcome-message"}`. '
+        "A valid override takes precedence over the saved Start-node greeting.\n"
         "  • `telephony_configuration_id` (int, optional) — pick a specific telephony "
         "configuration for the call. Must belong to the same organization as the "
-        "trigger. When omitted, the org's default outbound configuration is used."
+        "trigger. When omitted, the org's default outbound configuration is used.\n"
+        "  • `from_phone_number_id` (int, optional) — pick the caller-ID number to "
+        "use. It must be active and registered to the resolved telephony configuration."
     ),
     category=NodeCategory.trigger,
     icon="Webhook",

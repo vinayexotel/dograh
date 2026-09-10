@@ -14,6 +14,7 @@ from api.schemas.workflow_configurations import (
     DEFAULT_SMART_TURN_STOP_SECS,
     DEFAULT_TURN_START_MIN_WORDS,
     DEFAULT_TURN_START_STRATEGY,
+    WorkflowConfigurationDefaults,
 )
 from api.services.call_concurrency import call_concurrency
 from api.services.configuration.registry import ServiceProviders
@@ -63,6 +64,9 @@ from api.services.pipecat.service_factory import (
     create_stt_service,
     create_tts_service,
     stt_uses_external_turns,
+)
+from api.services.pipecat.termination_funnel_processor import (
+    TerminationFunnelProcessor,
 )
 from api.services.pipecat.tracing_config import (
     ensure_tracing,
@@ -207,9 +211,14 @@ def _create_realtime_user_turn_config(provider: str):
     """Return user turn strategies and optional local VAD for realtime providers."""
 
     def external_provider_turn_config():
+        # Since pipecat 1.8 these services propose turn boundaries
+        # (Proposed*SpeakingFrame) instead of announcing them, and no longer
+        # broadcast the barge-in themselves — the start strategy resolving the
+        # proposal owns it. Interruptions must therefore be enabled here, or
+        # nothing in the pipeline would broadcast them.
         return (
             UserTurnStrategies(
-                start=[ExternalUserTurnStartStrategy()],
+                start=[ExternalUserTurnStartStrategy(enable_interruptions=True)],
                 stop=[ExternalUserTurnStopStrategy(wait_for_transcript=False)],
             ),
             None,
@@ -229,8 +238,9 @@ def _create_realtime_user_turn_config(provider: str):
     if provider in {
         ServiceProviders.GOOGLE_REALTIME.value,
         ServiceProviders.GOOGLE_VERTEX_REALTIME.value,
+        ServiceProviders.AWS_NOVA_SONIC.value,
     }:
-        # Let Gemini Live own barge-in via its server-side VAD, but keep local
+        # Let the provider own barge-in via its server-side VAD, but keep local
         # Silero VAD for early user-turn start and speaking-state tracking.
         return local_vad_turn_config(enable_interruptions=False)
 
@@ -651,7 +661,12 @@ async def _run_pipeline_impl(
         ReactFlowDTO.model_validate(run_workflow_json),
         skip_instance_constraints_for={"trigger"},
     )
-    uses_variable_extraction = workflow_graph.uses_variable_extraction()
+    call_dispositions = WorkflowConfigurationDefaults.model_validate(
+        {"call_dispositions": run_configs.get("call_dispositions") or []}
+    ).call_dispositions
+    needs_extraction_llm = workflow_graph.uses_variable_extraction() or bool(
+        call_dispositions
+    )
 
     from api.services.managed_model_services import (
         MPS_CORRELATION_ID_CONTEXT_KEY,
@@ -696,16 +711,16 @@ async def _run_pipeline_impl(
         llm = create_llm_service(user_config, correlation_id=mps_correlation_id)
         inference_llm = None
 
-    # A shared LLM cannot carry an extraction usage_context without also tagging
-    # normal conversation or context-summarization requests. Create a dedicated
-    # client only for the managed provider; other providers ignore usage_context.
+    # Variable and disposition extraction may share this out-of-band LLM. A
+    # shared conversation LLM cannot carry an extraction usage_context without
+    # also tagging normal conversation or context-summarization requests.
     variable_extraction_llm = (
         create_llm_service(
             user_config,
             correlation_id=mps_correlation_id,
             usage_context="variable_extraction",
         )
-        if uses_variable_extraction
+        if needs_extraction_llm
         and user_config.llm.provider == ServiceProviders.DOGRAH.value
         else inference_llm or llm
     )
@@ -743,13 +758,18 @@ async def _run_pipeline_impl(
     # Pre-call fetch: fire early so it runs concurrently with remaining setup
     pre_call_fetch_task = None
     start_node = workflow_graph.nodes.get(workflow_graph.start_node_id)
+    call_direction = getattr(workflow_run, "call_type", None)
+    if hasattr(call_direction, "value"):
+        call_direction = call_direction.value
+    call_direction = call_direction or merged_call_context_vars.get("direction")
     if (
         start_node
-        and start_node.pre_call_fetch_enabled
+        and start_node.should_run_pre_call_fetch(call_direction)
         and start_node.pre_call_fetch_url
     ):
         logger.info(
-            f"Pre-call fetch enabled for workflow run {workflow_run_id}, "
+            f"Pre-call fetch enabled for {call_direction or 'unknown'} workflow "
+            f"run {workflow_run_id}, "
             f"firing request to {start_node.pre_call_fetch_url}"
         )
         pre_call_fetch_task = asyncio.create_task(
@@ -852,6 +872,7 @@ async def _run_pipeline_impl(
         embeddings_api_version=embeddings_api_version,
         has_recordings=has_recordings,
         context_compaction_enabled=context_compaction_enabled,
+        call_dispositions=call_dispositions,
     )
 
     # Create pipeline components
@@ -948,6 +969,11 @@ async def _run_pipeline_impl(
 
     pipeline_metrics_aggregator = PipelineMetricsAggregator()
 
+    # Terminations raised from inside the pipeline are handed to the engine
+    # instead of cancelling the worker directly. Its handler is registered by
+    # `register_event_handlers` once the task exists.
+    termination_funnel = TerminationFunnelProcessor()
+
     user_context_aggregator = context_aggregator.user()
     assistant_context_aggregator = context_aggregator.assistant()
 
@@ -1012,7 +1038,7 @@ async def _run_pipeline_impl(
         async def _on_voicemail_detected(_processor):
             logger.info(f"Voicemail detected for workflow run {workflow_run_id}")
             await engine.end_call_with_reason(
-                reason=EndTaskReason.VOICEMAIL_DETECTED.value,
+                call_status=EndTaskReason.VOICEMAIL_DETECTED.value,
                 abort_immediately=True,
             )
 
@@ -1043,6 +1069,7 @@ async def _run_pipeline_impl(
             assistant_context_aggregator,
             pipeline_engine_callback_processor,
             pipeline_metrics_aggregator,
+            termination_funnel,
             voicemail_detector=voicemail_detector,
         )
     else:
@@ -1056,6 +1083,7 @@ async def _run_pipeline_impl(
             assistant_context_aggregator,
             pipeline_engine_callback_processor,
             pipeline_metrics_aggregator,
+            termination_funnel,
             voicemail_detector=voicemail_detector,
             recording_router=recording_router,
         )
@@ -1140,6 +1168,7 @@ async def _run_pipeline_impl(
         in_memory_logs_buffer=in_memory_logs_buffer,
         transcript_log_coordinator=transcript_log_coordinator,
         pipeline_metrics_aggregator=pipeline_metrics_aggregator,
+        termination_funnel=termination_funnel,
         audio_config=audio_config,
         pre_call_fetch_task=pre_call_fetch_task,
         user_provider_id=user_provider_id,

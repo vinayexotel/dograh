@@ -48,6 +48,7 @@ import logger from "@/lib/logger";
 import { fetchModelConfigurationPricing } from "@/lib/modelConfigurationPricing";
 import {
     type AmbientNoiseConfiguration,
+    type CallDispositionOption,
     DEFAULT_PROVISIONAL_VAD_PAUSE_SECS,
     DEFAULT_TURN_START_MIN_WORDS,
     DEFAULT_VOICEMAIL_DETECTION_CONFIGURATION,
@@ -62,6 +63,13 @@ import {
 
 import { EmbedDialog } from "../components/EmbedDialog";
 import { useWorkflowState } from "../hooks/useWorkflowState";
+import {
+    CallDispositionEditor,
+    type CallDispositionRow,
+    createCallDispositionRows,
+    normalizeCallDispositions,
+    validateCallDispositionRows,
+} from "./components/CallDispositionEditor";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -269,11 +277,13 @@ const MAX_AMBIENT_NOISE_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 function GeneralSection({
     workflowConfigurations,
+    defaultCallDispositions,
     workflowName,
     workflowId,
     onSave,
 }: {
     workflowConfigurations: WorkflowConfigurations;
+    defaultCallDispositions: CallDispositionOption[];
     workflowName: string;
     workflowId: number;
     onSave: (configurations: WorkflowConfigurations, workflowName: string) => Promise<void>;
@@ -301,11 +311,17 @@ function GeneralSection({
     const [contextCompactionEnabled, setContextCompactionEnabled] = useState(
         workflowConfigurations.context_compaction_enabled,
     );
+    const [callDispositionRows, setCallDispositionRows] = useState<CallDispositionRow[]>(
+        () => createCallDispositionRows(workflowConfigurations.call_dispositions),
+    );
     const [includeTranscriptEndTimestamps, setIncludeTranscriptEndTimestamps] = useState(
         workflowConfigurations.transcript_configuration?.include_end_timestamps ?? false,
     );
     const [externalPbxFieldMappings, setExternalPbxFieldMappings] = useState<ExternalPBXFieldMapping[]>(
         workflowConfigurations.external_pbx_field_mappings,
+    );
+    const [externalPbxLeadHeaders, setExternalPbxLeadHeaders] = useState<string[]>(
+        workflowConfigurations.external_pbx_lead_headers,
     );
     const [isSaving, setIsSaving] = useState(false);
     const [isUploadingAudio, setIsUploadingAudio] = useState(false);
@@ -319,6 +335,19 @@ function GeneralSection({
         (mapping) =>
             Boolean(mapping.context_path.trim()) &&
             /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(mapping.destination_field.trim()),
+    );
+    const externalPbxLeadHeadersValid = externalPbxLeadHeaders.every((field) =>
+        /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(field.trim()),
+    );
+    const externalPbxSettingsValid =
+        externalPbxFieldMappingsValid && externalPbxLeadHeadersValid;
+    const normalizedCallDispositions = useMemo(
+        () => normalizeCallDispositions(callDispositionRows),
+        [callDispositionRows],
+    );
+    const callDispositionsValid = useMemo(
+        () => validateCallDispositionRows(callDispositionRows).isValid,
+        [callDispositionRows],
     );
 
     const isDirty = useMemo(() => {
@@ -334,12 +363,16 @@ function GeneralSection({
             provisionalVadPauseSecs !== workflowConfigurations.provisional_vad_pause_secs ||
             turnStopStrategy !== workflowConfigurations.turn_stop_strategy ||
             contextCompactionEnabled !== workflowConfigurations.context_compaction_enabled ||
+            JSON.stringify(normalizedCallDispositions) !==
+                JSON.stringify(workflowConfigurations.call_dispositions) ||
             includeTranscriptEndTimestamps !==
             (workflowConfigurations.transcript_configuration?.include_end_timestamps ?? false) ||
             JSON.stringify(externalPbxFieldMappings) !==
-            JSON.stringify(workflowConfigurations.external_pbx_field_mappings)
+            JSON.stringify(workflowConfigurations.external_pbx_field_mappings) ||
+            JSON.stringify(externalPbxLeadHeaders) !==
+            JSON.stringify(workflowConfigurations.external_pbx_lead_headers)
         );
-    }, [name, workflowName, ambientNoiseConfig, maxCallDuration, maxUserIdleTimeout, smartTurnStopSecs, turnStartStrategy, turnStartMinWords, provisionalVadPauseSecs, turnStopStrategy, contextCompactionEnabled, includeTranscriptEndTimestamps, externalPbxFieldMappings, workflowConfigurations]);
+    }, [name, workflowName, ambientNoiseConfig, maxCallDuration, maxUserIdleTimeout, smartTurnStopSecs, turnStartStrategy, turnStartMinWords, provisionalVadPauseSecs, turnStopStrategy, contextCompactionEnabled, normalizedCallDispositions, includeTranscriptEndTimestamps, externalPbxFieldMappings, externalPbxLeadHeaders, workflowConfigurations]);
 
     useUnsavedChanges("general", isDirty);
 
@@ -403,6 +436,7 @@ function GeneralSection({
 
     const handleSave = async () => {
         setIsSaving(true);
+        const callDispositionRowsAtSave = callDispositionRows;
         try {
             await onSave(
                 {
@@ -416,14 +450,24 @@ function GeneralSection({
                     provisional_vad_pause_secs: provisionalVadPauseSecs,
                     turn_stop_strategy: turnStopStrategy,
                     context_compaction_enabled: contextCompactionEnabled,
+                    call_dispositions: normalizedCallDispositions,
                     transcript_configuration: {
                         ...(workflowConfigurations.transcript_configuration ?? {}),
                         include_end_timestamps: includeTranscriptEndTimestamps,
                     },
                     external_pbx_field_mappings: externalPbxFieldMappings,
+                    external_pbx_lead_headers: externalPbxLeadHeaders.map((field) => field.trim()),
                 },
                 name,
             );
+            setCallDispositionRows((current) => (
+                current === callDispositionRowsAtSave
+                    ? current.map((row, index) => ({
+                        ...row,
+                        ...normalizedCallDispositions[index],
+                    }))
+                    : current
+            ));
             toast.success(`General settings saved. ${PUBLISH_WORKFLOW_REMINDER}`);
         } catch (error) {
             console.error("Failed to save general settings:", error);
@@ -770,6 +814,14 @@ function GeneralSection({
 
                 <Separator />
 
+                <CallDispositionEditor
+                    rows={callDispositionRows}
+                    onChange={setCallDispositionRows}
+                    defaultDispositions={defaultCallDispositions}
+                />
+
+                <Separator />
+
                 {/* Call Management */}
                 <div className="space-y-4">
                     <div>
@@ -889,6 +941,66 @@ function GeneralSection({
                                     </p>
                                 )}
                             </div>
+
+                            <div className="space-y-4 border-t pt-4">
+                                <div>
+                                    <h3 className="text-sm font-medium">Lead Fields To Capture</h3>
+                                    <p className="text-xs text-muted-foreground mt-0.5">
+                                        Extra lead fields to read from the inbound call, named without the header prefix
+                                        (<code>first_name</code> reads <code>X-VICIDIAL-first_name</code>). Captured values are
+                                        addressable in prompts as <code>{"{{initial_context.external_pbx_call.lead.<field>}}"}</code>.
+                                        Each field adds one request during call setup, so list only what the agent uses.
+                                    </p>
+                                </div>
+                                <div className="flex items-center justify-between">
+                                    <Label className="text-sm">Lead Fields</Label>
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() => setExternalPbxLeadHeaders((current) => [...current, ""])}
+                                    >
+                                        <Plus className="mr-1 h-4 w-4" /> Add field
+                                    </Button>
+                                </div>
+                                <div className="space-y-2">
+                                    {externalPbxLeadHeaders.map((field, index) => (
+                                        <div key={index} className="grid grid-cols-[1fr_auto] gap-2">
+                                            <Input
+                                                aria-label={`External PBX lead field ${index + 1}`}
+                                                value={field}
+                                                onChange={(event) => setExternalPbxLeadHeaders((current) =>
+                                                    current.map((item, itemIndex) =>
+                                                        itemIndex === index ? event.target.value : item,
+                                                    )
+                                                )}
+                                                placeholder="first_name"
+                                            />
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon"
+                                                aria-label={`Remove external PBX lead field ${index + 1}`}
+                                                onClick={() => setExternalPbxLeadHeaders((current) =>
+                                                    current.filter((_, itemIndex) => itemIndex !== index)
+                                                )}
+                                            >
+                                                <Trash2Icon className="h-4 w-4" />
+                                            </Button>
+                                        </div>
+                                    ))}
+                                    {externalPbxLeadHeaders.length === 0 && (
+                                        <p className="text-xs text-muted-foreground">
+                                            Only the identity fields needed to transfer or hang up the call are captured.
+                                        </p>
+                                    )}
+                                    {!externalPbxLeadHeadersValid && (
+                                        <p className="text-xs text-destructive">
+                                            Each lead field must start with a letter and contain only letters, numbers, and underscores.
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
                         </div>
                     </>
                 )}
@@ -897,7 +1009,12 @@ function GeneralSection({
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
                 <Button
                     onClick={handleSave}
-                    disabled={isSaving || !isDirty || (externalPbxIntegrationsEnabled && !externalPbxFieldMappingsValid)}
+                    disabled={
+                        isSaving
+                        || !isDirty
+                        || !callDispositionsValid
+                        || (externalPbxIntegrationsEnabled && !externalPbxSettingsValid)
+                    }
                 >
                     {isSaving ? "Saving..." : "Save General Settings"}
                 </Button>
@@ -1575,7 +1692,9 @@ function WorkflowSettingsInner({
     const {
         workflowName,
         workflowConfigurations,
+        defaultCallDispositions,
         textChatInactivityTimeoutConstraints,
+        widgetTextDefaults,
         templateContextVariables,
         dictionary,
         saveWorkflowConfigurations,
@@ -1673,6 +1792,7 @@ function WorkflowSettingsInner({
                             {/* General */}
                             <GeneralSection
                                 workflowConfigurations={resolvedWorkflowConfigurationsForRender}
+                                defaultCallDispositions={defaultCallDispositions}
                                 workflowName={workflowName || workflow.name}
                                 workflowId={workflowId}
                                 onSave={saveWorkflowConfigurations}
@@ -1793,6 +1913,7 @@ function WorkflowSettingsInner({
                     workflowName={workflowName || workflow.name}
                     workflowConfigurations={resolvedWorkflowConfigurationsForRender}
                     textChatInactivityTimeoutConstraints={textChatInactivityTimeoutConstraints}
+                    widgetTextDefaults={widgetTextDefaults}
                     onSaveWorkflowConfigurations={saveWorkflowConfigurations}
                 />
             )}

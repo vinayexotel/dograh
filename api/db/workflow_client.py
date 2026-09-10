@@ -297,6 +297,39 @@ class WorkflowClient(BaseDBClient):
             )
             return result.scalars().first()
 
+    async def get_definition_configurations(
+        self,
+        definition_id: int | None,
+        *,
+        organization_id: int,
+    ) -> dict:
+        """Load the configuration document for one workflow definition.
+
+        Callers that need configuration *before* a run row exists must read the
+        definition the run will bind to. ``WorkflowModel.workflow_configurations``
+        is a legacy column kept in sync with the draft, so reading it here would
+        let unpublished edits change live call behaviour.
+
+        Scoping is mandatory: the lookup joins through ``WorkflowModel`` so a
+        definition id belonging to another tenant returns ``{}`` rather than
+        that tenant's configuration.
+        """
+        if definition_id is None:
+            return {}
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(WorkflowDefinitionModel.workflow_configurations)
+                .join(
+                    WorkflowModel,
+                    WorkflowModel.id == WorkflowDefinitionModel.workflow_id,
+                )
+                .where(
+                    WorkflowDefinitionModel.id == definition_id,
+                    WorkflowModel.organization_id == organization_id,
+                )
+            )
+            return result.scalar_one_or_none() or {}
+
     async def get_workflow_versions(
         self,
         workflow_id: int,
@@ -846,6 +879,35 @@ class WorkflowClient(BaseDBClient):
                 counts[workflow_id] = run_count
 
             return counts
+
+    async def get_organization_disposition_codes(
+        self, organization_id: int
+    ) -> list[str]:
+        """Every disposition code observed across an organization's workflows.
+
+        ``add_call_disposition_code`` learns codes per workflow as runs finish,
+        which is what the per-workflow run filters offer. Org-wide filters need
+        the union, and it is the only way custom mapped codes (``XFER``,
+        ``DNC``, ...) can be offered at all - those exist nowhere in our enums.
+        """
+        async with self.async_session() as session:
+            result = await session.execute(
+                select(WorkflowModel.call_disposition_codes).where(
+                    WorkflowModel.organization_id == organization_id
+                )
+            )
+
+            codes: list[str] = []
+            seen: set[str] = set()
+            for (stored,) in result.all():
+                if not isinstance(stored, dict):
+                    continue
+                for code in stored.get("disposition_codes") or []:
+                    if isinstance(code, str) and code and code not in seen:
+                        seen.add(code)
+                        codes.append(code)
+
+            return codes
 
     async def add_call_disposition_code(
         self, workflow_id: int, disposition_code: str

@@ -372,9 +372,7 @@ async def test_initiate_call_stream_url_includes_token_when_secret_set():
 
     _, kwargs = session.post.call_args
     stream_url = kwargs["data"]["StreamUrl"]
-    assert stream_url.startswith(
-        "wss://api.example.test/api/v1/telephony/ws/7/9/42/"
-    )
+    assert stream_url.startswith("wss://api.example.test/api/v1/telephony/ws/7/9/42/")
     assert len(stream_url.rsplit("/", 1)[-1]) == 64
 
 

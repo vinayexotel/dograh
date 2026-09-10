@@ -478,9 +478,7 @@ async def test_inbound_run_routes_exotel_without_account_id_by_called_number():
         name="exotel-config",
         credentials={"account_sid": "sid123"},
     )
-    phone_row = SimpleNamespace(
-        id=77, inbound_workflow_id=33, address="07314852338"
-    )
+    phone_row = SimpleNamespace(id=77, inbound_workflow_id=33, address="07314852338")
     workflow = SimpleNamespace(id=33, user_id=99)
     provider_instance = SimpleNamespace(
         verify_inbound_signature=AsyncMock(return_value=True),
@@ -507,7 +505,9 @@ async def test_inbound_run_routes_exotel_without_account_id_by_called_number():
         ),
         patch(
             "api.routes.telephony.get_backend_endpoints",
-            new=AsyncMock(return_value=("https://api.example.test", "wss://api.example.test")),
+            new=AsyncMock(
+                return_value=("https://api.example.test", "wss://api.example.test")
+            ),
         ),
         patch(
             "api.routes.telephony.authorize_workflow_run_start",

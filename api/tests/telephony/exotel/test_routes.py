@@ -78,7 +78,9 @@ def _json_request(path: str, payload) -> Request:
     )
 
 
-def _authed_form_request(provider: ExotelProvider, form_data: dict[str, str]) -> Request:
+def _authed_form_request(
+    provider: ExotelProvider, form_data: dict[str, str]
+) -> Request:
     token = provider._status_callback_token(42)
     return _form_request(
         "/api/v1/telephony/exotel/status-callback/42",
@@ -107,9 +109,7 @@ async def test_status_callback_happy_path():
     )
 
     with (
-        patch(
-            "api.services.telephony.providers.exotel.routes.db_client"
-        ) as db_client,
+        patch("api.services.telephony.providers.exotel.routes.db_client") as db_client,
         patch(
             "api.services.telephony.providers.exotel.routes.get_telephony_provider_for_run",
             new_callable=AsyncMock,
@@ -150,9 +150,7 @@ async def test_status_callback_rejects_missing_auth():
     )
 
     with (
-        patch(
-            "api.services.telephony.providers.exotel.routes.db_client"
-        ) as db_client,
+        patch("api.services.telephony.providers.exotel.routes.db_client") as db_client,
         patch(
             "api.services.telephony.providers.exotel.routes.get_telephony_provider_for_run",
             new_callable=AsyncMock,
@@ -185,9 +183,7 @@ async def test_status_callback_rejects_call_sid_mismatch():
     )
 
     with (
-        patch(
-            "api.services.telephony.providers.exotel.routes.db_client"
-        ) as db_client,
+        patch("api.services.telephony.providers.exotel.routes.db_client") as db_client,
         patch(
             "api.services.telephony.providers.exotel.routes.get_telephony_provider_for_run",
             new_callable=AsyncMock,
@@ -218,9 +214,7 @@ async def test_status_callback_rejects_missing_bound_call_id():
     )
 
     with (
-        patch(
-            "api.services.telephony.providers.exotel.routes.db_client"
-        ) as db_client,
+        patch("api.services.telephony.providers.exotel.routes.db_client") as db_client,
         patch(
             "api.services.telephony.providers.exotel.routes.get_telephony_provider_for_run",
             new_callable=AsyncMock,
@@ -259,9 +253,7 @@ async def test_status_callback_missing_run_ignored():
         {"CallSid": "call-1", "Status": "completed"},
     )
 
-    with patch(
-        "api.services.telephony.providers.exotel.routes.db_client"
-    ) as db_client:
+    with patch("api.services.telephony.providers.exotel.routes.db_client") as db_client:
         db_client.get_workflow_run_by_id = AsyncMock(return_value=None)
         result = await handle_exotel_status_callback(99, request)
 

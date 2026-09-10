@@ -6,7 +6,6 @@ Common functions used across telephony operations.
 import inspect
 
 from fastapi import Request
-from loguru import logger
 from starlette.responses import HTMLResponse
 
 from api.constants import COUNTRY_CODES

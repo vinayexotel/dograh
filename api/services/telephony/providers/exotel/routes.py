@@ -63,9 +63,7 @@ async def handle_exotel_status_callback(workflow_run_id: int, request: Request):
         dict(request.headers),
     )
     if not is_valid:
-        logger.warning(
-            f"[run {workflow_run_id}] Invalid Exotel status callback auth"
-        )
+        logger.warning(f"[run {workflow_run_id}] Invalid Exotel status callback auth")
         raise HTTPException(status_code=401, detail="Invalid webhook signature")
 
     parsed = provider.parse_status_callback(callback_data)

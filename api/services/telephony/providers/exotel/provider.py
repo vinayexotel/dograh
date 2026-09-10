@@ -34,9 +34,7 @@ if TYPE_CHECKING:
     from fastapi import WebSocket
 
 DEFAULT_API_BASE_URL = "https://api.in.exotel.com"
-_STATUS_CALLBACK_PATH_RE = re.compile(
-    r"/api/v1/telephony/exotel/status-callback/(\d+)"
-)
+_STATUS_CALLBACK_PATH_RE = re.compile(r"/api/v1/telephony/exotel/status-callback/(\d+)")
 
 
 class ExotelProvider(TelephonyProvider):
@@ -426,8 +424,7 @@ class ExotelProvider(TelephonyProvider):
             )
             if not stream_sid or not call_sid:
                 logger.error(
-                    "Missing streamSid/callSid in Exotel start message: "
-                    f"{start_msg}"
+                    f"Missing streamSid/callSid in Exotel start message: {start_msg}"
                 )
                 await websocket.close(code=4400, reason="Missing stream identifiers")
                 return
@@ -493,7 +490,10 @@ class ExotelProvider(TelephonyProvider):
             return False  # Twilio
         if account_sid.endswith(".cloudonix.net"):
             return False  # Cloudonix
-        if "x-plivo-signature-v3" in normalized or "x-plivo-signature-ma-v3" in normalized:
+        if (
+            "x-plivo-signature-v3" in normalized
+            or "x-plivo-signature-ma-v3" in normalized
+        ):
             return False
         if webhook_data.get("CallUUID"):
             return False  # Plivo/Vobiz use CallUUID; Exotel uses CallSid.
@@ -560,9 +560,7 @@ class ExotelProvider(TelephonyProvider):
             or ""
         )
         direction = (
-            webhook_data.get("Direction")
-            or webhook_data.get("direction")
-            or "inbound"
+            webhook_data.get("Direction") or webhook_data.get("direction") or "inbound"
         ).lower()
         if direction in {"incoming", "inbound"}:
             direction = "inbound"
